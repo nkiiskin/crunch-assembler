@@ -1,5 +1,7 @@
 # Crunch assembler and linker
 
+![Crunchie, the Crunch mascot](Crunchie.jpg)
+
 Standalone extraction of the `crunch-as` x86-64 ELF assembler
 and `crunch-ld` linker from the Crunch 0.9.0 C-compiler suite. Linux x86-64 and a C11 compiler are
 required. GNU make and Python 3 are needed for the build and tests. Crunch-as comes with it's
