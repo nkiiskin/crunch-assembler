@@ -1,0 +1,196 @@
+.TH CRUNCH-LD 1 "November 2026" "crunch-ld 0.9.0" "User Commands"
+.SH NAME
+crunch-ld \- an experimental linker for x86-64 Linux ELF
+.SH SYNOPSIS
+.B crunch-ld
+[\fIoptions\fR] \fIfiles...\fR
+.SH DESCRIPTION
+.B crunch-ld
+is a lightweight, independent ELF linker designed for x86-64 Linux.
+It accepts ELF64 x86-64 relocatable objects and regular static archives.
+Static executable output is the default. Dynamic and shared output also
+accept supported ELF shared objects. Input and archive order is significant.
+This experimental linker is not a complete replacement for GNU ld.
+For dynamic and shared links, canonical x86 IBT/SHSTK GNU property notes
+are discarded with a warning; the output does not retain those CET protections.
+Other GNU property notes are rejected. Relocatable links preserve input notes.
+.SH OPTIONS
+.TP
+.B \-shared, \-\-shared
+Produce a restricted, loadable shared object. GOT-relative data references and
+PLT calls support undefined and preemptible symbols, resolved eagerly by the
+dynamic loader. Initialized 64-bit pointers in writable sections are resolved
+by the loader, including symbol addends and interposition. Direct PC-relative
+references must target local, hidden, or protected definitions. Read-only
+dynamic relocations are unsupported. TLS, unwind information, initialization and
+finalization through legacy sections, and full symbol versioning are unsupported.
+Shared initialization and finalization arrays are supported, including numeric
+priorities. See the crunch-ld README for input restrictions. ELF64 x86-64
+shared inputs with dynamic symbol and section metadata are recorded as
+dependencies, using their SONAME or, if absent, the input path (the basename
+for a library found with \-l). Repeated dependency names are recorded once.
+The loader search path can be embedded with \-rpath or configured separately.
+See the crunch-ld README for details.
+.TP
+.B \-dynamic, \-\-dynamic
+Produce a restricted fixed-address dynamically linked executable, using
+the interpreter selected by configure by default. Direct shared inputs are recorded as
+dependencies, and GOT and PLT references are resolved eagerly. Strong
+undefined references must be supplied by direct shared inputs. Executable
+initialization arrays are invoked before the entry point, with priorities and
+the original argc, argv, and envp. Executable finalization arrays run in reverse
+order when the reserved __crunch_run_finalizers hook is called. Current Crunch
+main-return and exit() paths call it; custom entry points must call it themselves.
+Direct exit syscalls bypass it, and shared-library finalizers, standard libc
+startup, TLS, and unwind sections remain unsupported. See AUTOMATIC RUNTIME
+and the crunch-ld README for details.
+.TP
+.B \-pie, \-\-pie, \-fPIE, \-fpie
+With \-dynamic, produce a position-independent executable using the system
+loader. Image-relative 64-bit pointers in writable sections are relocated at
+load time. Dynamic text relocations, narrow absolute image addresses, and
+direct PC-relative references to shared data are rejected. Most synthetic
+linker symbols are unsupported in dynamic PIE. Without \-dynamic, experimental
+PIE output has no dynamic loader and rejects GOT relocations.
+.TP
+.B \-I PATH, \-\-dynamic-linker PATH
+Select dynamic executable mode and use the absolute interpreter PATH.
+.TP
+.B \-soname NAME, \-\-soname=NAME, \-h NAME
+Set the SONAME of a shared output.
+.TP
+.B \-rpath PATH, \-\-rpath PATH
+Embed a DT_RUNPATH in shared or dynamic executable output. The forms
+\-rpath=PATH and \-\-rpath=PATH are also supported. Repeated paths are joined
+with colons. Quote '$ORIGIN' to preserve it for the loader. RUNPATH applies to
+the containing object's direct dependencies, not their children. It does not
+affect link-time library search. An automatically selected shared Crunch runtime
+adds its directory after explicit paths. Legacy DT_RPATH is not emitted. Empty arguments are rejected; empty
+colon-separated components can search the current working directory.
+.TP
+.B \-z relro, \-zrelro
+For shared or dynamic executable output, emit PT_GNU_RELRO covering dynamic
+metadata, the GOT, initialization and finalization arrays, and writable
+\&.data.rel.ro input sections. A compatible loader makes these pages read-only
+after relocation; ordinary data, BSS, and Crunch runtime registries remain
+writable. Without this option RELRO is not emitted. Other \-z options are
+unsupported.
+.TP
+.B \-\-no-undefined
+For shared output, reject strong symbols referenced by relocations but not
+defined by input objects or direct shared dependencies. Undefined weak
+symbols remain permitted.
+.TP
+.B \-Wabi-mismatch, \-Wall
+Warn about differing Crunch IR function signatures in declarations and
+selected relocatable-object definitions, including extracted archive members,
+and visible candidates in directly linked shared libraries.
+This is best effort, may report unused declarations or compatible calling
+conventions, and does not verify missing metadata, indirect dependencies, or
+later-loaded libraries. Runtime symbol interposition is not fully modeled;
+absence of a warning does not establish compatibility.
+.TP
+.B \-\-forbid-defined=SYMBOL
+Reject an output-object definition of SYMBOL, including a common or weak
+definition, while allowing definitions in shared inputs. May be repeated.
+.TP
+.B \-\-unique-shared-symbol=SYMBOL
+Reject SYMBOL if it is defined by more than one distinct direct shared input.
+Transitive dependencies are not checked. May be repeated.
+.TP
+.B \-L DIR, \-\-library-path=DIR, \-l NAME, \-\-library=NAME
+Add DIR to the library search path or link NAME. With \-shared or \-dynamic, search each directory for
+libNAME.so before libNAME.a; \-l:FILE searches for exactly FILE.
+Command-line directories precede the library_path entries in crunch.conf.
+.TP
+.B \-r, \-\-relocatable
+Produce a relocatable ELF object for a later link. Section groups are
+preserved and duplicate COMDAT groups are discarded. Some section types,
+symbol bindings, unwind layouts and options are unsupported.
+.TP
+.B \-o \fIfile\fR, \-\-output=\fIfile\fR
+Write output to \fIfile\fR (default: a.out).
+.TP
+.B \-T \fIscript\fR, \-\-script=\fIscript\fR
+Read a restricted linker script, supporting ENTRY, MEMORY, symbol assignments
+and ALIGN expressions. Not all GNU linker script syntax is supported.
+For static executable links, a non-ELF input is also treated as a script if
+it contains a recognized script construct and no NUL bytes. This detection
+does not validate the full script syntax.
+.TP
+.B \-e SYMBOL, \-\-entry=SYMBOL
+Set the executable entry symbol (default: _start).
+.TP
+.B \-\-start-group, \-( ... \-\-end-group, \-)
+Rescan archives within a group until no additional members are extracted.
+.TP
+.B \-u SYMBOL, \-\-undefined=SYMBOL
+Force a symbol to be undefined for archive extraction.
+.TP
+.B \-\-require-defined=SYMBOL
+Require a symbol definition, including one supplied by a direct shared input.
+.TP
+.B \-M FILE, \-\-Map=FILE
+Write a link map. Map output is not supported with shared or relocatable output.
+.TP
+.B \-\-gc-sections
+Enable garbage collection of unused input sections.
+.TP
+.B \-\-no-gc-sections
+Disable section garbage collection.
+.TP
+.B \-\-print-gc-sections
+Report discarded sections when garbage collection is enabled.
+.TP
+.B \-nostdlib, \-nodefaultlibs
+Do not add the Crunch runtime automatically.
+.TP
+.B \-crt0, \-\-crt0
+Prepend /usr/local/lib/crunch/crt0.o or, if absent, ./crt0.o. Fail if neither
+exists. Not supported for shared, dynamic, or relocatable output.
+.TP
+.B \-S, \-D, \-\-strip-debug
+Omit local symbols from ordinary output symbol tables.
+.TP
+.B \-s, \-\-strip-all
+Omit the ordinary symbol and string tables; shared-object dynamic symbols
+remain available to the loader.
+.TP
+.B \-v, \-\-version
+Print the linker version and exit.
+.TP
+.B \-get
+Accepted and ignored.
+.TP
+.B \-\-help
+Print option help and exit. The short option
+.B \-h
+sets the shared-object SONAME and is not a help alias.
+.SH AUTOMATIC RUNTIME
+Executable and shared links append a readable libcrunch.a (static output)
+or libcrunch.so (dynamic or shared output), unless an explicit Crunch runtime
+input is already present. Relocatable output never adds a runtime.
+For dynamic executables, a libcrunch-fallback.a alongside the runtime is
+also added when available.
+The linker searches command-line \-L directories followed by the
+colon-separated library_path entries in crunch.conf, checking each directory
+and its crunch subdirectory, then the configured installation runtime directory.
+If no runtime is found, linking continues without one.
+An explicit \-lcrunch, \-l:libcrunch.a, \-l:libcrunch.so, or runtime file
+preserves its position and suppresses automatic runtime selection.
+CRUNCH_CONF_FILE overrides the configured configuration filename.
+An automatically selected shared runtime adds its absolute directory to
+DT_RUNPATH after any explicit paths. Relative directories are resolved at
+link time; directories containing ':' or '$' are rejected. Explicit runtime
+inputs do not add a runtime search path automatically.
+.SH EXAMPLES
+.nf
+crunch-ld -nostdlib -o program start.o
+crunch-ld -r -o combined.o first.o second.o
+crunch-ld -shared -h libexample.so -o libexample.so example.o
+.fi
+.SH EXIT STATUS
+Zero on success, nonzero on invalid input, unsupported options, or link failure.
+.SH SEE ALSO
+.BR crunch (1),
+.BR crunch-ar (1)

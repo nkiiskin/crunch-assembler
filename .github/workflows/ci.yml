@@ -1,0 +1,36 @@
+name: Build and test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Build
+        run: make CFLAGS="-O2 -Werror"
+      - name: Test
+        run: make CFLAGS="-O2 -Werror" check
+      - name: Test staged installation
+        run: |
+          stage="$RUNNER_TEMP/crunch-assembler-install"
+          make DESTDIR="$stage" PREFIX=/usr/local install
+          printf '.text\n.globl _start\n_start:\nmov $42,%%edi\nmov $60,%%eax\nsyscall\n' > "$RUNNER_TEMP/program.s"
+          "$stage/usr/local/bin/crunch-as" -o "$RUNNER_TEMP/program.o" "$RUNNER_TEMP/program.s"
+          "$stage/usr/local/bin/crunch-ld" -nostdlib -o "$RUNNER_TEMP/program" "$RUNNER_TEMP/program.o"
+          set +e
+          "$RUNNER_TEMP/program"
+          status=$?
+          set -e
+          test "$status" -eq 42
+          make DESTDIR="$stage" PREFIX=/usr/local uninstall
+          test ! -e "$stage/usr/local/bin/crunch-as"
+          test ! -e "$stage/usr/local/bin/crunch-ld"
