@@ -17,6 +17,8 @@ staged installation on Ubuntu 24.04 when this project is hosted on GitHub.
 The installed tools default to `/usr/local/bin`; use `PREFIX=/path` and
 `DESTDIR=/staging` to change the installation location. Installing over a
 Crunch suite installation replaces its copies of the same tools.
+The standalone assembler's default linking behavior differs from older suite
+versions, so install it separately unless the suite supports `-c`.
 
 The linker embeds an automatically detected Linux ELF interpreter for dynamic
 links. Override it at build time with
@@ -27,10 +29,25 @@ to disable it when linking a standalone assembly program.
 Example:
 
 ```sh
-build/crunch-as -o program.o program.s
-build/crunch-ld -nostdlib -o program program.o
+build/crunch-as -nostdlib -o program program.s
 ./program
 ```
+
+By default, `crunch-as` assembles and invokes the `crunch-ld` installed
+beside it, writing `a.out` unless `-o` is given. Use `-c` to produce
+relocatable objects without linking:
+
+```sh
+build/crunch-as -c -o program.o program.s
+build/crunch-ld -nostdlib -o program program.o
+```
+
+Without `-o`, `-c` writes one `.o` file per input in the current directory.
+With `-o`, multiple source inputs are assembled into one object. Input defaults
+to standard input; `-c` names that object `stdin.o` unless `-o` is supplied.
+The old `crunch-as input.s output.o` shorthand is no longer supported; use
+`-c -o output.o input.s`. For linker options other than `-nostdlib`, assemble
+with `-c` and invoke `crunch-ld` separately.
 
 See [assembler documentation](docs/assembler.md) and
 [linker documentation](src/linker/README.md) for supported features and

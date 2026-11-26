@@ -3,6 +3,7 @@
 
 import os
 import pathlib
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -27,7 +28,7 @@ class LinkerTests(unittest.TestCase):
         path = self.path / (name + ".s")
         obj = self.path / (name + ".o")
         path.write_text(source)
-        self.command(AS, "-o", obj, path)
+        self.command(AS, "-c", "-o", obj, path)
         return obj
 
     def test_static_relocatable_and_archive(self):
@@ -62,6 +63,69 @@ class LinkerTests(unittest.TestCase):
                               obj, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("missing", result.stderr)
+
+    def test_assembler_links_by_default_and_c_produces_objects(self):
+        main = self.path / "main.s"
+        answer = self.path / "answer.s"
+        main.write_text(".text\n.globl _start\n_start:\n"
+                        "call answer\nmov %eax,%edi\nmov $60,%eax\nsyscall\n")
+        answer.write_text(".text\n.globl answer\nanswer:\nmov $42,%eax\nret\n")
+        env = dict(self.env, TMPDIR=str(self.path))
+        subprocess.run([AS, "-nostdlib", main, answer], cwd=self.path,
+                       env=env, check=True, capture_output=True)
+        self.assertEqual(self.command(self.path / "a.out", check=False).returncode, 42)
+        self.assertEqual(sorted(p.name for p in self.path.iterdir()),
+                         ["a.out", "answer.s", "main.s"])
+        subprocess.run([AS, "-c", main, answer], cwd=self.path,
+                       env=env, check=True, capture_output=True)
+        for name in ("main.o", "answer.o"):
+            self.assertEqual((self.path / name).read_bytes()[16:18], b"\x01\x00")
+        combined = self.path / "combined.o"
+        self.command(AS, "-c", "-o", combined, main, answer)
+        self.assertEqual(combined.read_bytes()[16:18], b"\x01\x00")
+
+    def test_assembler_link_failure_and_missing_linker_cleanup(self):
+        source = self.path / "missing.s"
+        source.write_text(".text\n.globl _start\n_start:\ncall missing\n")
+        env = dict(self.env, TMPDIR=str(self.path))
+        result = subprocess.run([AS, "-nostdlib", "-o", self.path / "program", source],
+                                env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("missing", result.stderr)
+        self.assertFalse(list(self.path.glob("crunch-as-*")))
+        isolated = self.path / "isolated"
+        isolated.mkdir()
+        shutil.copy2(AS, isolated / "crunch-as")
+        result = subprocess.run([isolated / "crunch-as", source], cwd=self.path,
+                                env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot execute crunch-ld", result.stderr)
+        self.assertFalse(list(self.path.glob("crunch-as-*")))
+
+    def test_linked_inputs_keep_local_symbols_separate(self):
+        first = self.path / "first.s"
+        second = self.path / "second.s"
+        first.write_text(".text\n.globl _start\n_start:\n"
+                         "call answer\nmov %eax,%edi\nmov $60,%eax\nsyscall\n"
+                         ".Llocal:\nret\n")
+        second.write_text(".text\n.globl answer\nanswer:\n"
+                          "mov $42,%eax\nret\n.Llocal:\nret\n")
+        executable = self.path / "program"
+        self.command(AS, "-nostdlib", "-o", executable, first, second)
+        self.assertEqual(self.command(executable, check=False).returncode, 42)
+
+    def test_assembler_stdin_and_failure_preserves_output(self):
+        output = self.path / "program"
+        env = dict(self.env, TMPDIR=str(self.path))
+        source = ".text\n.globl _start\n_start:\nmov $42,%edi\nmov $60,%eax\nsyscall\n"
+        subprocess.run([AS, "-nostdlib", "-o", output], input=source, text=True,
+                       env=env, check=True, capture_output=True)
+        self.assertEqual(self.command(output, check=False).returncode, 42)
+        result = subprocess.run([AS, "-o", output], input="invalid_instruction\n",
+                                text=True, env=env, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.command(output, check=False).returncode, 42)
+        self.assertFalse(list(self.path.glob("crunch-as-*")))
 
 
 if __name__ == "__main__":

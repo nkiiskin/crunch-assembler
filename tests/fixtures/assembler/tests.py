@@ -17,6 +17,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 
 def command(*args):
     """Run a tool and report its output if it fails."""
+    if args and args[0] == ASSEMBLER:
+        args = (args[0], "-c", *args[1:])
     result = subprocess.run([str(arg) for arg in args], capture_output=True, text=True)
     if result.returncode:
         raise AssertionError(f"{args}: exit {result.returncode}\n{result.stderr}")
@@ -146,7 +148,7 @@ class AssemblerTests(unittest.TestCase):
     def diagnostic(self, source):
         """Return the diagnostic for a rejected standard-input source."""
         result = subprocess.run(
-            [str(ASSEMBLER), "-o", str(self.path / "failed.o")],
+            [str(ASSEMBLER), "-c", "-o", str(self.path / "failed.o")],
             input=source, capture_output=True, text=True
         )
         self.assertNotEqual(result.returncode, 0)
@@ -243,7 +245,7 @@ class AssemblerTests(unittest.TestCase):
         for assembler in ("as", ASSEMBLER):
             with self.subTest(assembler=assembler):
                 obj = self.path / f"{pathlib.Path(assembler).name}.o"
-                result = subprocess.run([str(assembler), "-I", str(first), f"-I{second}",
+                result = subprocess.run([str(assembler), "-c", "-I", str(first), f"-I{second}",
                                          "-o", str(obj), str(source)],
                                         cwd=self.path, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 0, result.stderr)
@@ -253,7 +255,7 @@ class AssemblerTests(unittest.TestCase):
         (self.path / "choice.inc").unlink()
         for assembler in ("as", ASSEMBLER):
             obj = self.path / f"search-{pathlib.Path(assembler).name}.o"
-            result = subprocess.run([str(assembler), "-I", str(first), "-I", str(second),
+            result = subprocess.run([str(assembler), "-c", "-I", str(first), "-I", str(second),
                                      "-o", str(obj), str(source)],
                                     cwd=self.path, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -284,14 +286,14 @@ class AssemblerTests(unittest.TestCase):
                                             "-o", str(self.path / "failed-gnu.o"), str(source)],
                                            cwd=self.path, capture_output=True, text=True)
                 self.assertNotEqual(reference.returncode, 0)
-                result = subprocess.run([str(ASSEMBLER), "-I", str(includes),
+                result = subprocess.run([str(ASSEMBLER), "-c", "-I", str(includes),
                                          "-o", str(output), str(source)],
                                         cwd=self.path, capture_output=True, text=True)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(location, result.stderr)
                 self.assertEqual(output.read_bytes(), b"unchanged")
         source.write_text('.macro bad\n.include "bad.inc"\n.endm\nbad\n')
-        result = subprocess.run([str(ASSEMBLER), "-I", str(includes),
+        result = subprocess.run([str(ASSEMBLER), "-c", "-I", str(includes),
                                  "-o", str(output), str(source)],
                                 cwd=self.path, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
@@ -300,7 +302,7 @@ class AssemblerTests(unittest.TestCase):
         cycle = includes / "cycle.inc"
         cycle.write_text('.include "cycle.inc"\n')
         source.write_text('.include "cycle.inc"\n')
-        result = subprocess.run([str(ASSEMBLER), "-I", str(includes),
+        result = subprocess.run([str(ASSEMBLER), "-c", "-I", str(includes),
                                  "-o", str(output), str(source)],
                                 cwd=self.path, capture_output=True, text=True, timeout=10)
         self.assertNotEqual(result.returncode, 0)
@@ -319,7 +321,7 @@ class AssemblerTests(unittest.TestCase):
             header = named_section(output, ".data")
             self.assertEqual(output.read_bytes()[header[4]:header[4] + header[5]], b"\x2a\x05")
         source.write_text(f'.include "{filename}"\ninvalid_instruction\n')
-        result = subprocess.run([str(ASSEMBLER), "-o", str(self.path / "failed.o"), str(source)],
+        result = subprocess.run([str(ASSEMBLER), "-c", "-o", str(self.path / "failed.o"), str(source)],
                                 capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(f"{source}:2: error:", result.stderr)
@@ -330,12 +332,12 @@ class AssemblerTests(unittest.TestCase):
         source = source_dir / "source.s"
         source.write_text('.include "only-here.inc"\n')
         for assembler in ("as", ASSEMBLER):
-            result = subprocess.run([str(assembler), "-o", str(self.path / "failed.o"), str(source)],
+            result = subprocess.run([str(assembler), "-c", "-o", str(self.path / "failed.o"), str(source)],
                                     cwd=self.path, capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("only-here.inc", result.stderr)
         for args in (["-I"], ["-I", ""], ["-I", str(source_dir), "-I"]):
-            result = subprocess.run([str(ASSEMBLER), *args], capture_output=True, text=True)
+            result = subprocess.run([str(ASSEMBLER), "-c", *args], capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("-I requires", result.stderr)
 
@@ -356,7 +358,7 @@ class AssemblerTests(unittest.TestCase):
                                   self.diagnostic(source))
         output = self.path / "preserved.o"
         output.write_bytes(b"unchanged")
-        result = subprocess.run([str(ASSEMBLER), "-o", str(output)],
+        result = subprocess.run([str(ASSEMBLER), "-c", "-o", str(output)],
                                 input=".data\n.bytegarbage 42\n",
                                 capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
@@ -423,7 +425,7 @@ class AssemblerTests(unittest.TestCase):
         output = self.path / "preserved-subsection.o"
         output.write_bytes(b"unchanged")
         source = ".text 1\n.byte 0x11\n.text 0\n.byte 0x22\n.text 1\n.byte 0x33\n"
-        result = subprocess.run([str(ASSEMBLER), "-o", str(output)],
+        result = subprocess.run([str(ASSEMBLER), "-c", "-o", str(output)],
                                 input=source, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("nonzero section subsections are unsupported", result.stderr)
@@ -434,7 +436,7 @@ class AssemblerTests(unittest.TestCase):
         first.write_text(".text\nret\n")
         second.write_text("# comment\n\ninvalid_instruction\n")
         result = subprocess.run(
-            [str(ASSEMBLER), "-o", str(self.path / "failed.o"), str(first), str(second)],
+            [str(ASSEMBLER), "-c", "-o", str(self.path / "failed.o"), str(first), str(second)],
             capture_output=True, text=True
         )
         self.assertNotEqual(result.returncode, 0)
@@ -611,7 +613,7 @@ class AssemblerTests(unittest.TestCase):
         self.assertEqual(safe.read_bytes()[header[4]:header[4] + header[5]], b"\x2a")
         output = self.path / "altmacro-preserved.o"
         output.write_bytes(b"unchanged")
-        result = subprocess.run([str(ASSEMBLER), "-o", str(output)],
+        result = subprocess.run([str(ASSEMBLER), "-c", "-o", str(output)],
                                 input=".altmacro\n.data\n.byte 42\n",
                                 capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
@@ -1242,7 +1244,7 @@ class AssemblerTests(unittest.TestCase):
         self.assertIn("unterminated string", self.diagnostic('.ascii "unterminated\n'))
         output = self.path / "string-preserved.o"
         output.write_bytes(b"unchanged")
-        result = subprocess.run([str(ASSEMBLER), "-o", str(output)],
+        result = subprocess.run([str(ASSEMBLER), "-c", "-o", str(output)],
                                 input='.data\n.ascii "one" junk\n', capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(output.read_bytes(), b"unchanged")
@@ -1461,7 +1463,7 @@ class AssemblerTests(unittest.TestCase):
                 self.diagnostic(statement + "\n")
         output = self.path / "group-preserved.o"
         output.write_bytes(b"unchanged")
-        result = subprocess.run([str(ASSEMBLER), "-o", str(output)],
+        result = subprocess.run([str(ASSEMBLER), "-c", "-o", str(output)],
                                 input=statements[0] + "\n", capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(output.read_bytes(), b"unchanged")

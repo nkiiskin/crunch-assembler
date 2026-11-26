@@ -1,17 +1,20 @@
 # Crunch object assembler
 
-`crunch-as` is an experimental x86-64 assembler that writes ELF64 relocatable
-objects. It is built and installed with the other Crunch stage tools.
+`crunch-as` is an x86-64 assembler that produces ELF64 relocatable objects and
+by default links them into an executable using the adjacent `crunch-ld`.
+Use `-c` to assemble without linking.
 
 ```sh
-build/out/crunch-as -o output.o input.s
-build/out/crunch --with-crunch-as program.bc -o program
+build/crunch-as -nostdlib -o program input.s
+build/crunch-as -c -o output.o input.s
 ```
 
-The assembler accepts `-` or no input file to read standard input. The driver
-option selects `crunch-as` for Crunch, `.s` and preprocessed `.S` inputs. It
-does not fall back to GNU `as` on failure. GNU `as` remains the driver's
-default assembler.
+The assembler accepts `-` or no input file to read standard input. Without
+`-o`, linking produces `a.out`; `-c` produces one object per input in the
+current directory, or `stdin.o` for standard input. Multiple inputs with
+`-c -o` are assembled together into one object. The linker accepts `-nostdlib`
+through the assembler; invoke `crunch-ld` separately for other linker options.
+The compiler suite must use `-c` when invoking this version of `crunch-as`.
 
 The experimental assembler builds the installed `libcrunch.a` and
 `libcrunch.so.1` by default.
@@ -106,7 +109,7 @@ relocations for the linker.
 
 ## Shared-library interoperability
 
-`crunch-as` produces relocatable objects, not shared libraries. Hand-written
+With `-c`, `crunch-as` produces relocatable objects, not shared libraries. Hand-written
 position-independent assembly can be linked into a `.so` with GNU `ld`. For
 example:
 
@@ -140,7 +143,7 @@ answer:
 Save this as `answer.s`, then build and load it with:
 
 ```sh
-crunch-as -o answer.o answer.s
+crunch-as -c -o answer.o answer.s
 ld -shared -z text -o libanswer.so answer.o
 python3 -c 'import ctypes; print(ctypes.CDLL("./libanswer.so").answer())'
 ```

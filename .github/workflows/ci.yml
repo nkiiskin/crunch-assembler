@@ -24,8 +24,7 @@ jobs:
           stage="$RUNNER_TEMP/crunch-assembler-install"
           make DESTDIR="$stage" PREFIX=/usr/local install
           printf '.text\n.globl _start\n_start:\nmov $42,%%edi\nmov $60,%%eax\nsyscall\n' > "$RUNNER_TEMP/program.s"
-          "$stage/usr/local/bin/crunch-as" -o "$RUNNER_TEMP/program.o" "$RUNNER_TEMP/program.s"
-          "$stage/usr/local/bin/crunch-ld" -nostdlib -o "$RUNNER_TEMP/program" "$RUNNER_TEMP/program.o"
+          "$stage/usr/local/bin/crunch-as" -nostdlib -o "$RUNNER_TEMP/program" "$RUNNER_TEMP/program.s"
           set +e
           "$RUNNER_TEMP/program"
           status=$?
