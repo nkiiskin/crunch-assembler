@@ -14,6 +14,12 @@
 #include <sys/random.h>
 #endif
 
+/**
+ * @brief Looks up a variable in the process environment.
+ * @param env Process environment.
+ * @param name Variable name.
+ * @return The value, or NULL if absent.
+ */
 static const char *environment_value(char **env, const char *name)
 {
     size_t length = strlen(name);
@@ -23,6 +29,12 @@ static const char *environment_value(char **env, const char *name)
     return NULL;
 }
 
+/**
+ * @brief Creates a uniquely named temporary object.
+ * @param path Writable path ending in six placeholder characters.
+ * @param length Length of the path.
+ * @return Open descriptor, or -1 on failure.
+ */
 static int create_temporary(char *path, size_t length)
 {
 #ifdef __CRUNCH__
@@ -50,6 +62,11 @@ static int create_temporary(char *path, size_t length)
 #endif
 }
 
+/**
+ * @brief Derives an object filename from an input path.
+ * @param input Source path or "-" for standard input.
+ * @return Allocated object filename, or NULL on allocation failure.
+ */
 static char *default_object_name(const char *input)
 {
     const char *name = strrchr(input, '/');
@@ -65,6 +82,15 @@ static char *default_object_name(const char *input)
     return result;
 }
 
+/**
+ * @brief Invokes the adjacent linker and waits for it.
+ * @param objects Temporary object paths.
+ * @param count Number of objects.
+ * @param output Executable output path.
+ * @param nostdlib Whether to disable default runtime libraries.
+ * @param env Process environment.
+ * @return Linker exit status, or nonzero on failure.
+ */
 static int link_objects(char *const *objects, size_t count, const char *output,
                         int nostdlib, char **env)
 {
