@@ -23,6 +23,8 @@ jobs:
         run: |
           stage="$RUNNER_TEMP/crunch-assembler-install"
           make DESTDIR="$stage" PREFIX=/usr/local install
+          cmp src/assembler/crunch-as.1 "$stage/usr/local/share/man/man1/crunch-as.1"
+          cmp src/linker/crunch-ld.1 "$stage/usr/local/share/man/man1/crunch-ld.1"
           printf '.text\n.globl _start\n_start:\nmov $42,%%edi\nmov $60,%%eax\nsyscall\n' > "$RUNNER_TEMP/program.s"
           "$stage/usr/local/bin/crunch-as" -nostdlib -o "$RUNNER_TEMP/program" "$RUNNER_TEMP/program.s"
           set +e
@@ -33,3 +35,5 @@ jobs:
           make DESTDIR="$stage" PREFIX=/usr/local uninstall
           test ! -e "$stage/usr/local/bin/crunch-as"
           test ! -e "$stage/usr/local/bin/crunch-ld"
+          test ! -e "$stage/usr/local/share/man/man1/crunch-as.1"
+          test ! -e "$stage/usr/local/share/man/man1/crunch-ld.1"

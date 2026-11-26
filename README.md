@@ -1,13 +1,19 @@
 # Crunch assembler and linker
 
-Standalone extraction of the experimental `crunch-as` x86-64 ELF assembler
-and `crunch-ld` linker from Crunch 0.9.0. Linux x86-64 and a C11 compiler are
-required. GNU make and Python 3 are needed for the build and tests.
+Standalone extraction of the `crunch-as` x86-64 ELF assembler
+and `crunch-ld` linker from the Crunch 0.9.0 C-compiler suite. Linux x86-64 and a C11 compiler are
+required. GNU make and Python 3 are needed for the build and tests. Crunch-as comes with it's
+own crunch-as(1) man page.
 
 ```sh
 make
 make check
-sudo make install
+sudo make install PREFIX=/opt
+
+# Assemble and link:
+crunch-as -nostdlib -o program main.s tools.s
+# Assemble only:
+crunch-as -c -o program.o *.s
 ```
 
 `make check` also needs GNU binutils and a system C compiler. Four tests

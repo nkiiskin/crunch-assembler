@@ -34,14 +34,14 @@ check: all
 install: all
 	install -d "$(DESTDIR)$(PREFIX)/bin" "$(DESTDIR)$(PREFIX)/share/man/man1" "$(DESTDIR)$(PREFIX)/share/doc/crunch-assembler/docs" "$(DESTDIR)$(PREFIX)/share/doc/crunch-assembler/src/linker"
 	install -m 755 $(TOOLS) "$(DESTDIR)$(PREFIX)/bin/"
-	install -m 644 src/linker/crunch-ld.1 "$(DESTDIR)$(PREFIX)/share/man/man1/"
+	install -m 644 src/assembler/crunch-as.1 src/linker/crunch-ld.1 "$(DESTDIR)$(PREFIX)/share/man/man1/"
 	install -m 644 README.md Copying "$(DESTDIR)$(PREFIX)/share/doc/crunch-assembler/"
 	install -m 644 docs/assembler.md "$(DESTDIR)$(PREFIX)/share/doc/crunch-assembler/docs/"
 	install -m 644 src/linker/README.md "$(DESTDIR)$(PREFIX)/share/doc/crunch-assembler/src/linker/"
 
 uninstall:
 	rm -f "$(DESTDIR)$(PREFIX)/bin/crunch-as" "$(DESTDIR)$(PREFIX)/bin/crunch-ld"
-	rm -f "$(DESTDIR)$(PREFIX)/share/man/man1/crunch-ld.1"
+	rm -f "$(DESTDIR)$(PREFIX)/share/man/man1/crunch-as.1" "$(DESTDIR)$(PREFIX)/share/man/man1/crunch-ld.1"
 	rm -f "$(DESTDIR)$(PREFIX)/share/doc/crunch-assembler/README.md" "$(DESTDIR)$(PREFIX)/share/doc/crunch-assembler/Copying"
 	rm -f "$(DESTDIR)$(PREFIX)/share/doc/crunch-assembler/docs/assembler.md" "$(DESTDIR)$(PREFIX)/share/doc/crunch-assembler/src/linker/README.md"
 

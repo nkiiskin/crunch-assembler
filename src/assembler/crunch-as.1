@@ -1,0 +1,83 @@
+.TH CRUNCH-AS 1 "November 2026" "crunch-as 0.9.0" "User Commands"
+.SH NAME
+crunch-as \- assemble and link x86-64 Linux ELF programs
+.SH SYNOPSIS
+.B crunch-as
+[\fB\-c\fR] [\fB\-nostdlib\fR] [\fB\-I\fR \fIdir\fR]
+[\fB\-o\fR \fIoutput\fR] [\fIinput.s\fR ...]
+.SH DESCRIPTION
+.B crunch-as
+assembles x86-64 AT&T syntax into ELF64 relocatable objects.
+By default, it assembles each input separately and invokes the
+.B crunch-ld
+executable located beside the assembler to produce an executable.
+The default executable name is
+.BR a.out .
+The assembler supports a subset of GNU assembler syntax.
+.PP
+An input named
+.B \-
+reads standard input; if no input is supplied, standard input is used.
+The assembler does not run a C preprocessor.
+.SH OPTIONS
+.TP
+.B \-c
+Assemble without linking. Without
+.BR \-o ,
+write one object per input in the current directory, replacing a trailing
+.B .s
+with
+.BR .o ,
+or appending
+.B .o
+otherwise. Standard input produces
+.BR stdin.o .
+With
+.BR \-o ,
+all inputs are assembled together into one object.
+.TP
+.BI \-o " output"
+Write the executable or object to
+.IR output .
+.TP
+.BI \-I " dir"
+Add a directory to the search path for assembler
+.B .include
+directives. Relative names are searched first in the current working
+directory, then in the specified directories in order.
+.B \-Idir
+is also accepted.
+.TP
+.B \-nostdlib
+Pass this option to
+.B crunch-ld
+to disable automatic Crunch runtime selection.
+For other linker options, assemble with
+.B \-c
+and invoke
+.B crunch-ld
+separately.
+.TP
+.B \-\-help
+Print usage information and exit.
+.SH ENVIRONMENT
+.TP
+.B TMPDIR
+Directory for temporary objects when linking. Defaults to
+.B /tmp
+when unset or empty.
+.SH EXIT STATUS
+Zero indicates success; a nonzero status indicates an assembler or linker
+failure.
+.SH EXAMPLES
+.nf
+crunch-as \-nostdlib \-o program program.s
+crunch-as \-c \-o program.o program.s
+crunch-ld \-nostdlib \-o program program.o
+.fi
+.SH SEE ALSO
+.BR crunch-ld (1)
+.PP
+The installed documentation includes
+.B docs/assembler.md
+for supported syntax and limitations.
