@@ -32,6 +32,18 @@ or appending
 .B .o
 otherwise. Standard input produces
 .BR stdin.o .
+If multiple default object paths refer to the same file, the command is
+rejected before writing any output. Dangling output symlinks are also
+rejected with multiple inputs.
+Objects are written to temporary files in the destination directory and
+replaced individually after successful writes; a multi-object invocation can
+therefore update some outputs even if another output fails. Existing object destinations
+must be regular files with no other hard links; symbolic links are rejected.
+Existing ownership and ordinary permission bits are retained, but other
+metadata such as ACLs and extended attributes may not be retained.
+The destination directory must permit temporary file creation and replacement.
+When built with Crunch, object output also requires a mounted
+.BR /proc .
 With
 .BR \-o ,
 all inputs are assembled together into one object.
@@ -39,6 +51,9 @@ all inputs are assembled together into one object.
 .BI \-o " output"
 Write the executable or object to
 .IR output .
+An output that refers to a command-line input or an opened
+.B .include
+file, including through a symbolic or hard link, is rejected.
 .TP
 .BI \-I " dir"
 Add a directory to the search path for assembler
@@ -63,7 +78,12 @@ Print usage information and exit.
 .SH ENVIRONMENT
 .TP
 .B TMPDIR
-Directory for temporary objects when linking. Defaults to
+Directory for temporary objects when linking or assembling multiple inputs
+with
+.B \-c
+without
+.BR \-o .
+Defaults to
 .B /tmp
 when unset or empty.
 .SH EXIT STATUS

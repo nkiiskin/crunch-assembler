@@ -16,6 +16,8 @@ sudo make install PREFIX=/opt
 crunch-as -nostdlib -o program main.s tools.s
 # Assemble only:
 crunch-as -c -o program.o *.s
+# Assemble from stdin:
+cat source.s | crunch-as -o program
 ```
 
 `make check` also needs GNU binutils and a system C compiler. Four tests

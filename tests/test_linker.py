@@ -3,6 +3,8 @@
 
 import os
 import pathlib
+import resource
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -126,6 +128,289 @@ class LinkerTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.command(output, check=False).returncode, 42)
         self.assertFalse(list(self.path.glob("crunch-as-*")))
+
+    def test_assembler_rejects_output_aliasing_input(self):
+        source = self.path / "program.s"
+        original = (".text\n.globl _start\n_start:\n"
+                    "mov $42,%edi\nmov $60,%eax\nsyscall\n")
+        source.write_text(original)
+        hardlink = self.path / "hardlink"
+        symlink = self.path / "symlink"
+        os.link(source, hardlink)
+        symlink.symlink_to(source)
+        for output in (source, hardlink, symlink):
+            for flags in (["-c"], ["-nostdlib"]):
+                with self.subTest(output=output, flags=flags):
+                    result = self.command(AS, *flags, "-o", output, source, check=False)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("same file as input", result.stderr)
+                    self.assertEqual(source.read_text(), original)
+        with source.open() as stdin:
+            result = subprocess.run([AS, "-c", "-o", hardlink], stdin=stdin,
+                                    env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("same file as input", result.stderr)
+        self.assertEqual(source.read_text(), original)
+        other = self.path / "other.s"
+        other.write_text(".text\nnop\n")
+        for flags in (["-c"], ["-nostdlib"]):
+            result = self.command(AS, *flags, "-o", source, other, source, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("same file as input", result.stderr)
+            self.assertEqual(source.read_text(), original)
+            self.assertEqual(other.read_text(), ".text\nnop\n")
+
+        default_output = self.path / "a.out"
+        default_output.hardlink_to(source)
+        result = subprocess.run([AS, "-nostdlib", source], cwd=self.path,
+                                env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("same file as input", result.stderr)
+        self.assertEqual(source.read_text(), original)
+
+    def test_assembler_checks_all_inputs_before_default_outputs(self):
+        first = self.path / "first.s"
+        second = self.path / "first.o"
+        first.write_text(".text\nret\n")
+        second.write_text(".text\nnop\n")
+        result = subprocess.run([AS, "-c", first, second], cwd=self.path,
+                                env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("same file as input", result.stderr)
+        self.assertEqual(first.read_text(), ".text\nret\n")
+        self.assertEqual(second.read_text(), ".text\nnop\n")
+        self.assertFalse((self.path / "first.o.o").exists())
+
+    def test_assembler_rejects_output_aliasing_nested_include(self):
+        includes = self.path / "includes"
+        includes.mkdir()
+        nested = includes / "nested.inc"
+        original = ".text\n.globl _start\n_start:\nmov $42,%edi\nmov $60,%eax\nsyscall\n"
+        nested.write_text(original)
+        (includes / "outer.inc").write_text('.include "nested.inc"\n')
+        source = self.path / "program.s"
+        source.write_text('.include "outer.inc"\n')
+        hardlink = self.path / "hardlink"
+        symlink = self.path / "symlink"
+        os.link(nested, hardlink)
+        symlink.symlink_to(nested)
+        for output in (nested, hardlink, symlink):
+            for flags in (["-c"], ["-nostdlib"]):
+                with self.subTest(output=output, flags=flags):
+                    result = self.command(AS, *flags, "-I", includes, "-o", output,
+                                          source, check=False)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("same file as include", result.stderr)
+                    self.assertEqual(nested.read_text(), original)
+        output = self.path / "program"
+        self.command(AS, "-nostdlib", "-I", includes, "-o", output, source)
+        self.assertEqual(self.command(output, check=False).returncode, 42)
+
+    def test_default_outputs_cannot_overwrite_later_include(self):
+        first = self.path / "first.s"
+        second = self.path / "second.s"
+        included = self.path / "first.o"
+        first.write_text(".text\nret\n")
+        second.write_text('.include "first.o"\n')
+        included.write_text(".text\nnop\n")
+        result = subprocess.run([AS, "-c", first, second], cwd=self.path,
+                                env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("same file as include", result.stderr)
+        self.assertEqual(included.read_text(), ".text\nnop\n")
+        self.assertFalse((self.path / "second.o").exists())
+
+    def test_default_object_cannot_alias_include(self):
+        source = self.path / "main.s"
+        included = self.path / "included.s"
+        included.write_text(".text\nret\n")
+        (self.path / "main.o").symlink_to(included)
+        source.write_text('.include "included.s"\n')
+        result = subprocess.run([AS, "-c", source], cwd=self.path,
+                                env=self.env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("same file as include", result.stderr)
+        self.assertEqual(included.read_text(), ".text\nret\n")
+
+    def test_duplicate_default_object_names_are_rejected(self):
+        first_dir = self.path / "first"
+        second_dir = self.path / "second"
+        first_dir.mkdir()
+        second_dir.mkdir()
+        first, second = first_dir / "same.s", second_dir / "same.s"
+        first.write_text(".text\nret\n")
+        second.write_text(".text\nnop\n")
+        output = self.path / "same.o"
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                if existing:
+                    output.write_bytes(b"preserved")
+                result = subprocess.run([AS, "-c", first, second], cwd=self.path,
+                                        env=self.env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("same file", result.stderr)
+                if existing:
+                    self.assertEqual(output.read_bytes(), b"preserved")
+                else:
+                    self.assertFalse(output.exists())
+        output.unlink()
+        subprocess.run([AS, "-c", "-o", output, first, second], cwd=self.path,
+                       env=self.env, check=True, capture_output=True)
+        self.assertEqual(output.read_bytes()[:4], b"\x7fELF")
+
+    def test_aliasing_default_object_paths_are_rejected(self):
+        first, second = self.path / "first.s", self.path / "second.s"
+        first.write_text(".text\nret\n")
+        second.write_text(".text\nnop\n")
+        first_obj, second_obj = self.path / "first.o", self.path / "second.o"
+        for kind in ("hardlink", "symlink", "dangling"):
+            with self.subTest(kind=kind):
+                if kind != "dangling":
+                    first_obj.write_bytes(b"preserved")
+                if kind == "hardlink":
+                    os.link(first_obj, second_obj)
+                else:
+                    second_obj.symlink_to(first_obj)
+                result = subprocess.run([AS, "-c", first, second], cwd=self.path,
+                                        env=self.env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("dangling" if kind == "dangling" else "same file", result.stderr)
+                if kind != "dangling":
+                    self.assertEqual(first_obj.read_bytes(), b"preserved")
+                    first_obj.unlink()
+                else:
+                    self.assertFalse(first_obj.exists())
+                second_obj.unlink()
+
+    def test_object_write_failure_preserves_existing_file(self):
+        source = self.path / "program.s"
+        source.write_text(".text\nret\n")
+        output = self.path / "program.o"
+        output.write_bytes(b"existing object")
+        output.chmod(0o640)
+
+        def limit_output():
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (64, 64))
+
+        for args in (["-c", "-o", output, source], ["-c", source]):
+            with self.subTest(args=args):
+                result = subprocess.run([AS, *args], cwd=self.path, env=self.env,
+                                        capture_output=True, text=True, preexec_fn=limit_output)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(output.read_bytes(), b"existing object")
+                self.assertEqual(output.stat().st_mode & 0o777, 0o640)
+                self.assertFalse(list(self.path.glob(".crunch-as-*")))
+        subprocess.run([AS, "-c", "-o", output, source], cwd=self.path,
+                       env=self.env, check=True, capture_output=True)
+        self.assertEqual(output.read_bytes()[:4], b"\x7fELF")
+        self.assertEqual(output.stat().st_mode & 0o777, 0o640)
+        output.unlink()
+        subprocess.run([AS, "-c", "-o", output, source], cwd=self.path,
+                       env=self.env, check=True, capture_output=True,
+                       preexec_fn=lambda: os.umask(0o027))
+        self.assertEqual(output.stat().st_mode & 0o777, 0o640)
+
+    def test_linked_and_nonregular_object_outputs_are_rejected(self):
+        source = self.path / "program.s"
+        source.write_text(".text\nret\n")
+        target = self.path / "target"
+        target.write_bytes(b"existing object")
+        output = self.path / "program.o"
+        for kind in ("symlink", "dangling", "hardlink", "directory"):
+            with self.subTest(kind=kind):
+                if kind == "symlink":
+                    output.symlink_to(target)
+                elif kind == "dangling":
+                    output.symlink_to(self.path / "missing")
+                elif kind == "hardlink":
+                    os.link(target, output)
+                else:
+                    output.mkdir()
+                result = subprocess.run([AS, "-c", "-o", output, source], cwd=self.path,
+                                        env=self.env, capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(target.read_bytes(), b"existing object")
+                if kind == "directory":
+                    output.rmdir()
+                else:
+                    output.unlink()
+
+    def test_multi_object_copy_failure_preserves_output(self):
+        library_source = self.path / "fail-write.c"
+        library = self.path / "fail-write.so"
+        library_source.write_text(r'''
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+size_t fwrite(const void *data, size_t size, size_t count, FILE *stream) {
+    char fdpath[64], path[PATH_MAX];
+    const char *dir = getenv("CRUNCH_TEST_FAIL_DIRECTORY");
+    snprintf(fdpath, sizeof fdpath, "/proc/self/fd/%d", fileno(stream));
+    ssize_t n = readlink(fdpath, path, sizeof path - 1);
+    if (n >= 0 && dir) {
+        path[n] = 0;
+        size_t length = strlen(dir);
+        if (!strncmp(path, dir, length) && !strncmp(path + length, "/.crunch-as-", 12)) {
+            errno = ENOSPC;
+            return 0;
+        }
+    }
+    size_t (*real_fwrite)(const void *, size_t, size_t, FILE *) = dlsym(RTLD_NEXT, "fwrite");
+    return real_fwrite(data, size, count, stream);
+}
+int rename(const char *old_path, const char *new_path) {
+    const char *fail = getenv("CRUNCH_TEST_FAIL_RENAME");
+    if (fail && !strcmp(fail, new_path)) {
+        errno = EACCES;
+        return -1;
+    }
+    int (*real_rename)(const char *, const char *) = dlsym(RTLD_NEXT, "rename");
+    return real_rename(old_path, new_path);
+}
+''')
+        self.command("cc", "-shared", "-fPIC", library_source, "-ldl", "-o", library)
+        first, second = self.path / "first.s", self.path / "second.s"
+        first.write_text(".text\nret\n")
+        second.write_text(".text\nnop\n")
+        first_obj, second_obj = self.path / "first.o", self.path / "second.o"
+        first_obj.write_bytes(b"first original")
+        second_obj.write_bytes(b"second original")
+        temp = self.path / "temp"
+        temp.mkdir()
+        env = dict(self.env, TMPDIR=str(temp), LD_PRELOAD=str(library),
+                   CRUNCH_TEST_FAIL_DIRECTORY=str(self.path))
+        result = subprocess.run([AS, "-c", first, second], cwd=self.path, env=env,
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(first_obj.read_bytes(), b"first original")
+        self.assertEqual(second_obj.read_bytes(), b"second original")
+        self.assertFalse(list(self.path.glob(".crunch-as-*")))
+        self.assertEqual(list(temp.iterdir()), [])
+        env = dict(self.env, TMPDIR=str(temp), LD_PRELOAD=str(library),
+                   CRUNCH_TEST_FAIL_RENAME=second_obj.name)
+        result = subprocess.run([AS, "-c", first, second], cwd=self.path, env=env,
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(first_obj.read_bytes()[:4], b"\x7fELF")
+        self.assertEqual(second_obj.read_bytes(), b"second original")
+        self.assertFalse(list(self.path.glob(".crunch-as-*")))
+        self.assertEqual(list(temp.iterdir()), [])
+
+    def test_only_opened_includes_are_protected(self):
+        source = self.path / "main.s"
+        output = self.path / "main.o"
+        source.write_text('.if 0\n.include "main.o"\n.endif\n'
+                          '# 1 "main.o"\n.text\nret\n')
+        output.write_text("not an include\n")
+        subprocess.run([AS, "-c", source], cwd=self.path, env=self.env,
+                       check=True, capture_output=True)
+        self.assertEqual(output.read_bytes()[:4], b"\x7fELF")
 
 
 if __name__ == "__main__":

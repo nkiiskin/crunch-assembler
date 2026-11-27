@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -83,6 +84,90 @@ static char *default_object_name(const char *input)
 }
 
 /**
+ * @brief Rejects an output referring to any input file.
+ * @param output Proposed output path.
+ * @param inputs Input paths, including "-" for standard input.
+ * @param count Number of input paths.
+ * @return Zero if safe, or nonzero on collision or inspection failure.
+ */
+static int check_output_inputs(const char *output, const char *const *inputs, size_t count)
+{
+    struct stat output_stat;
+    if (stat(output, &output_stat) != 0) {
+        if (errno == ENOENT) return 0;
+        fprintf(stderr, "crunch-as: cannot inspect output '%s': %s\n", output, strerror(errno));
+        return 1;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        struct stat input_stat;
+        int status = !strcmp(inputs[i], "-") ? fstat(STDIN_FILENO, &input_stat)
+                                              : stat(inputs[i], &input_stat);
+        if (status != 0) {
+            fprintf(stderr, "crunch-as: cannot inspect input '%s': %s\n",
+                    inputs[i], strerror(errno));
+            return 1;
+        }
+        if (output_stat.st_dev == input_stat.st_dev &&
+            output_stat.st_ino == input_stat.st_ino) {
+            fprintf(stderr, "crunch-as: output '%s' is the same file as input '%s'\n",
+                    output, inputs[i]);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/**
+ * @brief Rejects default object paths that could overwrite each other.
+ * @param outputs Derived object paths.
+ * @param count Number of output paths.
+ * @return Zero if distinct, or nonzero on collision or inspection failure.
+ */
+static int check_distinct_outputs(char *const *outputs, size_t count)
+{
+    for (size_t i = 0; i < count; ++i) {
+        struct stat left;
+        int left_exists = stat(outputs[i], &left) == 0;
+        if (!left_exists) {
+            if (errno != ENOENT) {
+                fprintf(stderr, "crunch-as: cannot inspect output '%s': %s\n",
+                        outputs[i], strerror(errno));
+                return 1;
+            }
+            struct stat link_stat;
+            if (lstat(outputs[i], &link_stat) == 0) {
+                fprintf(stderr, "crunch-as: output '%s' is a dangling symlink or changed during inspection\n",
+                        outputs[i]);
+                return 1;
+            } else if (errno != ENOENT) {
+                fprintf(stderr, "crunch-as: cannot inspect output '%s': %s\n",
+                        outputs[i], strerror(errno));
+                return 1;
+            }
+        }
+        for (size_t j = 0; j < i; ++j) {
+            struct stat right;
+            int same = !strcmp(outputs[i], outputs[j]);
+            if (!same && left_exists) {
+                if (stat(outputs[j], &right) == 0)
+                    same = left.st_dev == right.st_dev && left.st_ino == right.st_ino;
+                else if (errno != ENOENT) {
+                    fprintf(stderr, "crunch-as: cannot inspect output '%s': %s\n",
+                            outputs[j], strerror(errno));
+                    return 1;
+                }
+            }
+            if (same) {
+                fprintf(stderr, "crunch-as: output paths '%s' and '%s' refer to the same file\n",
+                        outputs[j], outputs[i]);
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/**
  * @brief Invokes the adjacent linker and waits for it.
  * @param objects Temporary object paths.
  * @param count Number of objects.
@@ -154,7 +239,7 @@ int main(int argc, char **argv, char **env)
     const char **include_dirs = calloc((size_t)argc + 1, sizeof *include_dirs);
     size_t count = 0, include_count = 0;
     int compile_only = 0, nostdlib = 0, result = 1;
-    char *owned_output = NULL, **temporary = NULL;
+    char **outputs = NULL, **temporary = NULL;
     if (!inputs || !include_dirs) {
         fprintf(stderr, "crunch-as: out of memory\n");
         goto done;
@@ -194,24 +279,30 @@ int main(int argc, char **argv, char **env)
     }
     if (!count) inputs[count++] = "-";
     if (!output && compile_only) {
-        result = 0;
+        outputs = calloc(count, sizeof *outputs);
+        if (!outputs) {
+            fprintf(stderr, "crunch-as: out of memory\n");
+            goto done;
+        }
         for (size_t i = 0; i < count; ++i) {
-            owned_output = default_object_name(inputs[i]);
-            if (!owned_output) {
+            outputs[i] = default_object_name(inputs[i]);
+            if (!outputs[i]) {
                 fprintf(stderr, "crunch-as: out of memory\n");
-                result = 1;
                 goto done;
             }
-            if (crunch_assemble_files_with_includes(&inputs[i], 1, owned_output,
-                                                    include_dirs, include_count) != COMPILER_OK)
-                result = 1;
-            free(owned_output);
-            owned_output = NULL;
+            if (check_output_inputs(outputs[i], inputs, count)) goto done;
         }
-        goto done;
+        if (count > 1 && check_distinct_outputs(outputs, count)) goto done;
+        if (count == 1) {
+            result = crunch_assemble_files_with_includes(inputs, count, outputs[0],
+                                                         include_dirs, include_count) == COMPILER_OK ? 0 : 1;
+            goto done;
+        }
+    } else {
+        if (!output) output = "a.out";
+        if (check_output_inputs(output, inputs, count)) goto done;
     }
-    if (!output) output = "a.out";
-    if (compile_only) {
+    if (compile_only && !outputs) {
         result = crunch_assemble_files_with_includes(inputs, count, output,
                                                      include_dirs, include_count) == COMPILER_OK ? 0 : 1;
         goto done;
@@ -246,11 +337,20 @@ int main(int argc, char **argv, char **env)
             perror("crunch-as: temporary object");
             goto done;
         }
-        if (crunch_assemble_files_with_includes(&inputs[i], 1, temporary[i],
-                                                include_dirs, include_count) != COMPILER_OK)
+        const char *const *protected_outputs = outputs ? (const char *const *)outputs : &output;
+        size_t protected_count = outputs ? count : 1;
+        if (crunch_assemble_files_protecting_outputs(&inputs[i], 1, temporary[i],
+                                                     include_dirs, include_count,
+                                                     protected_outputs, protected_count) != COMPILER_OK)
             goto done;
     }
-    result = link_objects(temporary, count, output, nostdlib, env);
+    if (outputs) {
+        result = 0;
+        for (size_t i = 0; i < count; ++i)
+            if (crunch_copy_object_safely(temporary[i], outputs[i]) != COMPILER_OK) result = 1;
+    } else {
+        result = link_objects(temporary, count, output, nostdlib, env);
+    }
 done:
     if (temporary) {
         for (size_t i = 0; i < count; ++i) {
@@ -259,7 +359,8 @@ done:
         }
     }
     free(temporary);
-    free(owned_output);
+    if (outputs) for (size_t i = 0; i < count; ++i) free(outputs[i]);
+    free(outputs);
     free(inputs);
     free(include_dirs);
     return result;

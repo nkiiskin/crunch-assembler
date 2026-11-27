@@ -8,6 +8,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/random.h>
+#include <unistd.h>
 
 #ifndef SHF_GNU_RETAIN
 #define SHF_GNU_RETAIN 0x200000
@@ -32,6 +36,9 @@ static const SourceLocationNode *current_location;
 static const char *const *assembler_include_dirs;
 static size_t assembler_include_count;
 static int include_io_error;
+static const char *assembler_output;
+static const char *const *assembler_protected_outputs;
+static size_t assembler_protected_count;
 
 typedef struct Sym { char *name; uint64_t value, size; unsigned char bind, type, visibility; int defined, section, local_common, pending_common, signature_group; uint32_t name_offset, elf_index; size_t file_count; struct Sym *next; } Sym;
 typedef struct { char *source, *alias; const SourceLocationNode *location; } Symver;
@@ -112,6 +119,131 @@ static void report_io_error(const char *name){
  if(name&&*name)fprintf(stderr,"%s: %s\n",name,strerror(errno));
  else fprintf(stderr,"%s\n",strerror(errno));
 }
+
+typedef struct {
+ const char *output;
+ char *temporary;
+ FILE *stream;
+ struct stat original;
+ int existing;
+} ObjectOutput;
+
+/**
+ * @brief Opens a temporary object beside a safe regular-file destination.
+ * @param object Output state to initialize.
+ * @param output Destination path.
+ * @return Zero on success, or nonzero on failure.
+ */
+static int begin_object_output(ObjectOutput *object,const char *output){
+ memset(object,0,sizeof *object);object->output=output;
+ if(lstat(output,&object->original)==0){
+  if(!S_ISREG(object->original.st_mode)||object->original.st_nlink!=1){
+   fprintf(stderr,"crunch-as: object output '%s' must be a regular file without other hard links\n",output);
+   return 1;
+  }
+  int fd=open(output,O_WRONLY|O_NONBLOCK|O_NOFOLLOW,0);
+  if(fd<0){report_io_error(output);return 1;}
+  struct stat opened;
+  int valid=fstat(fd,&opened)==0&&S_ISREG(opened.st_mode)&&opened.st_nlink==1&&
+            opened.st_dev==object->original.st_dev&&opened.st_ino==object->original.st_ino;
+  int close_error=close(fd);
+  if(!valid||close_error){
+   fprintf(stderr,"crunch-as: cannot safely inspect object output '%s'\n",output);
+   return 1;
+  }
+  object->original=opened;object->existing=1;
+ }else if(errno!=ENOENT){report_io_error(output);return 1;}
+ const char *slash=strrchr(output,'/');
+ size_t directory=slash?(size_t)(slash-output)+1:0;
+ if(directory>SIZE_MAX-sizeof ".crunch-as-XXXXXX"){errno=ENAMETOOLONG;report_io_error(output);return 1;}
+ object->temporary=malloc(directory+sizeof ".crunch-as-XXXXXX");
+ if(!object->temporary){errno=ENOMEM;report_io_error(output);return 1;}
+ memcpy(object->temporary,output,directory);
+ memcpy(object->temporary+directory,".crunch-as-XXXXXX",sizeof ".crunch-as-XXXXXX");
+ static const char alphabet[]="abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+ for(int attempt=0;attempt<256;attempt++){
+  unsigned char bytes[6];size_t used=0;
+  while(used<sizeof bytes){
+   ssize_t n=getrandom(bytes+used,sizeof bytes-used,0);
+   if(n<0&&errno==EINTR)continue;
+   if(n<=0){if(!n)errno=EIO;report_io_error(output);free(object->temporary);object->temporary=NULL;return 1;}
+   used+=(size_t)n;
+  }
+  for(size_t i=0;i<sizeof bytes;i++)object->temporary[directory+11+i]=alphabet[bytes[i]%62];
+  int fd=open(object->temporary,O_WRONLY|O_CREAT|O_EXCL,object->existing?0600:0666);
+  if(fd<0){if(errno==EEXIST)continue;break;}
+#ifdef __CRUNCH__
+  char descriptor_path[64];
+  snprintf(descriptor_path,sizeof descriptor_path,"/proc/self/fd/%d",fd);
+  object->stream=fopen(descriptor_path,"wb");
+  int saved_errno=errno;
+  if(close(fd)!=0&&object->stream){saved_errno=errno;fclose(object->stream);object->stream=NULL;}
+  errno=saved_errno;
+#else
+  object->stream=fdopen(fd,"wb");
+  if(!object->stream){int saved_errno=errno;close(fd);errno=saved_errno;}
+#endif
+  if(object->stream)return 0;
+  int open_error=errno;unlink(object->temporary);errno=open_error;break;
+ }
+ report_io_error(output);free(object->temporary);object->temporary=NULL;return 1;
+}
+
+/**
+ * @brief Closes and conditionally replaces an object destination.
+ * @param object Output state initialized by begin_object_output.
+ * @param error Whether writing has already failed.
+ * @return Zero on success, or nonzero on failure.
+ */
+static int finish_object_output(ObjectOutput *object,int error){
+ if(fflush(object->stream)!=0||ferror(object->stream))error=1;
+ if(!error&&object->existing){
+  int fd=fileno(object->stream);struct stat staged;
+  if(fstat(fd,&staged)!=0||
+     ((staged.st_uid!=object->original.st_uid||staged.st_gid!=object->original.st_gid)&&
+      fchown(fd,object->original.st_uid,object->original.st_gid)!=0)||
+     fchmod(fd,object->original.st_mode&0777)!=0)error=1;
+ }
+ if(fclose(object->stream)!=0)error=1;
+ if(!error){
+  struct stat current;
+  int exists=lstat(object->output,&current)==0;
+  if((!exists&&errno!=ENOENT)||exists!=object->existing||
+     (exists&&(!S_ISREG(current.st_mode)||current.st_nlink!=1||
+               current.st_dev!=object->original.st_dev||current.st_ino!=object->original.st_ino))){
+   fprintf(stderr,"crunch-as: object output '%s' changed during assembly\n",object->output);
+   error=1;
+  }else if(rename(object->temporary,object->output)!=0){
+   report_io_error(object->output);error=1;
+  }
+ }
+ if(error){
+  fprintf(stderr,"crunch-as: failed to write object '%s'\n",object->output);
+  unlink(object->temporary);
+ }
+ free(object->temporary);return error;
+}
+
+/**
+ * @brief Copies a staged object with atomic replacement of its destination.
+ * @param source Existing staged object path.
+ * @param output Destination object path.
+ * @return Compiler status; diagnostics are written to standard error.
+ */
+CompilerStatus crunch_copy_object_safely(const char *source,const char *output){
+ if(!source||!*source||!output||!*output)return COMPILER_INVALID_INPUT;
+ FILE *in=fopen(source,"rb");
+ if(!in){report_io_error(source);return COMPILER_IO_ERROR;}
+ ObjectOutput object;
+ if(begin_object_output(&object,output)){fclose(in);return COMPILER_IO_ERROR;}
+ char buffer[8192];size_t n;int error=0;
+ while((n=fread(buffer,1,sizeof buffer,in))!=0)
+  if(fwrite(buffer,1,n,object.stream)!=n){error=1;break;}
+ if(ferror(in))error=1;
+ if(fclose(in)!=0)error=1;
+ return finish_object_output(&object,error)?COMPILER_IO_ERROR:COMPILER_OK;
+}
+
 static void err(const char *s){
  if(current_location){
   fprintf(stderr,"crunch-as: %s:%zu: error: %s\n",current_location->filename,current_location->line,s);
@@ -2175,6 +2307,25 @@ static int insert_include(SourceLine **srcp,size_t *count,size_t index,char *ope
   }
   free(name);free(path);return 0;
  }
+ struct stat input_stat;
+ if(fstat(fileno(file),&input_stat)!=0){
+  err("cannot inspect include file");include_io_error=1;
+  fclose(file);free(name);free(path);return 0;
+ }
+ for(size_t i=0;i<=assembler_protected_count;i++){
+  const char *output=i?assembler_protected_outputs[i-1]:assembler_output;
+  struct stat output_stat;
+  if(stat(output,&output_stat)!=0){
+   if(errno==ENOENT)continue;
+   err("cannot inspect output file");include_io_error=1;
+   fclose(file);free(name);free(path);return 0;
+  }
+  if(output_stat.st_dev==input_stat.st_dev&&output_stat.st_ino==input_stat.st_ino){
+   char message[1024];snprintf(message,sizeof message,
+                              "output '%s' is the same file as include '%s'",output,path);
+   err(message);fclose(file);free(name);free(path);return 0;
+  }
+ }
  free(name);
  const char *filename=intern_filename(path);free(path);
  if(!filename){fclose(file);return 0;}
@@ -2407,7 +2558,8 @@ static int parse_line_marker(const char *text,const char **filename,size_t *line
  *filename=stored;*line_number=(size_t)number;return 1;
 }
 
-static int assemble_files(const char *const *inputs, size_t ninputs, const char *output){
+static int assemble_files(const char *const *inputs, size_t ninputs,
+                          ObjectOutput *object, const char *output){
  report_warnings=0;
  SourceLine *lines=NULL;size_t linecap=0;char *line=NULL;size_t cap=0;ssize_t n;
  for(size_t fi=0;fi<ninputs;fi++){
@@ -2593,7 +2745,11 @@ static int assemble_files(const char *const *inputs, size_t ninputs, const char 
  for(size_t i=0;i<nfile_symbols;i++){size_t z=strlen(file_symbols[i])+1;memcpy(str+file_offset,file_symbols[i],z);file_offset+=z;}
  for(size_t i=0;i<ns;i++)memcpy(str+syms[i]->name_offset,syms[i]->name,strlen(syms[i]->name)+1);
  Elf64_Ehdr eh={0};memcpy(eh.e_ident,ELFMAG,SELFMAG);eh.e_ident[EI_CLASS]=ELFCLASS64;eh.e_ident[EI_DATA]=ELFDATA2LSB;eh.e_ident[EI_VERSION]=EV_CURRENT;eh.e_ident[EI_OSABI]=ELFOSABI_SYSV;eh.e_type=ET_REL;eh.e_machine=EM_X86_64;eh.e_version=EV_CURRENT;eh.e_ehsize=sizeof eh;eh.e_shentsize=sizeof(Elf64_Shdr);eh.e_shnum=(uint16_t)shnum;eh.e_shstrndx=(uint16_t)shstr_idx;
- FILE *out=fopen(output,"wb");if(!out){report_io_error(output);for(size_t sec=1;sec<=target_count;sec++)free(rel_arrays[sec]);free(str);free(rel_arrays);free(rel_used);free(rel_count);free(target_names);free(rela_names);free(sh);free(es);free(order);return 2;}fwrite(&eh,sizeof eh,1,out);long off=(long)sizeof eh;
+ if(begin_object_output(object,output)){
+  for(size_t sec=1;sec<=target_count;sec++)free(rel_arrays[sec]);
+  free(str);free(rel_arrays);free(rel_used);free(rel_count);free(target_names);free(rela_names);free(sh);free(es);free(order);return 2;
+ }
+ FILE *out=object->stream;fwrite(&eh,sizeof eh,1,out);long off=(long)sizeof eh;
  #define PAD(a) while(off%(long)(a)){fputc(0,out);off++;}
  for(size_t g=0;g<nsection_groups;g++){PAD(4);sh[g+1].sh_offset=(uint64_t)off;fwrite(&group_entries[g*(1+2*MAX_CUSTOM_SECTIONS)],sizeof(uint32_t),group_sizes[g],out);off+=(long)(group_sizes[g]*sizeof(uint32_t));}
  for(size_t sec=1;sec<=target_count;sec++){
@@ -2610,10 +2766,57 @@ static int assemble_files(const char *const *inputs, size_t ninputs, const char 
  if(fwrite(&eh,sizeof eh,1,out)!=1)io_error=1;
  if(fseek(out,(long)eh.e_shoff,SEEK_SET)!=0)io_error=1;
  if(fwrite(sh,sizeof *sh,shnum,out)!=shnum)io_error=1;
- if(fclose(out)!=0)io_error=1;
- if(io_error)fprintf(stderr,"crunch-as: failed to write object '%s'\n",output);
  for(size_t sec=1;sec<=target_count;sec++){free(rel_arrays[sec]);}
  free(str);free(rel_arrays);free(rel_used);free(rel_count);free(target_names);free(rela_names);free(sh);free(es);free(order);return io_error?2:0;
+}
+
+/**
+ * @brief Assembles files while protecting additional output paths from includes.
+ * @param inputs Input paths; "-" reads standard input.
+ * @param count Number of input paths.
+ * @param output Object output path.
+ * @param include_dirs Include directories searched after the working directory.
+ * @param include_count Number of include directories.
+ * @param protected_outputs Additional output paths to protect.
+ * @param protected_count Number of additional output paths.
+ * @return Compiler status; diagnostics are currently emitted to standard error.
+ */
+CompilerStatus crunch_assemble_files_protecting_outputs(const char *const *inputs,size_t count,
+                                                        const char *output,
+                                                        const char *const *include_dirs,
+                                                        size_t include_count,
+                                                        const char *const *protected_outputs,
+                                                        size_t protected_count){
+ if(!inputs||!count||!output||!*output)return COMPILER_INVALID_INPUT;
+ for(size_t i=0;i<count;i++)if(!inputs[i]||!*inputs[i])return COMPILER_INVALID_INPUT;
+ if(include_count&&!include_dirs)return COMPILER_INVALID_INPUT;
+ for(size_t i=0;i<include_count;i++)if(!include_dirs[i]||!*include_dirs[i])return COMPILER_INVALID_INPUT;
+ if(protected_count&&!protected_outputs)return COMPILER_INVALID_INPUT;
+ for(size_t i=0;i<protected_count;i++)if(!protected_outputs[i]||!*protected_outputs[i])return COMPILER_INVALID_INPUT;
+ ObjectOutput object={0};
+ assembler_include_dirs=include_dirs;assembler_include_count=include_count;include_io_error=0;
+ assembler_output=output;assembler_protected_outputs=protected_outputs;assembler_protected_count=protected_count;
+ reset_assembly_state();nlines=0;nmacros=0;macro_unique=0;
+ int result=assemble_files(inputs,count,&object,output);
+ if(result==1&&object.stream){
+  fclose(object.stream);unlink(object.temporary);free(object.temporary);
+ }else if(object.stream&&finish_object_output(&object,result!=0))result=2;
+ reset_assembly_state();
+ for(size_t i=0;i<nequs;i++){free(equs[i].name);free(equs[i].expr);}nequs=0;
+ for(size_t i=0;i<nmacros;i++){
+   free(macros[i].name);
+   for(size_t j=0;j<macros[i].np;j++){free(macros[i].params[j]);free(macros[i].defaults[j]);}
+   for(size_t j=0;j<macros[i].nb;j++)free(macros[i].body[j].text);
+   free(macros[i].body);
+ }
+ nmacros=0;nlines=0;
+ free(short_lines);short_lines=NULL;
+ current_location=NULL;
+ while(allocated_locations){SourceLocationNode *next=allocated_locations->allocated_next;free(allocated_locations);allocated_locations=next;}
+ while(allocated_filenames){SourceFilename *next=allocated_filenames->next;free(allocated_filenames->name);free(allocated_filenames);allocated_filenames=next;}
+ assembler_include_dirs=NULL;assembler_include_count=0;include_io_error=0;
+ assembler_output=NULL;assembler_protected_outputs=NULL;assembler_protected_count=0;
+ return result==2?COMPILER_IO_ERROR:result?COMPILER_CODEGEN_ERROR:COMPILER_OK;
 }
 
 /**
@@ -2629,28 +2832,7 @@ CompilerStatus crunch_assemble_files_with_includes(const char *const *inputs,siz
                                                     const char *output,
                                                     const char *const *include_dirs,
                                                     size_t include_count){
- if(!inputs||!count||!output||!*output)return COMPILER_INVALID_INPUT;
- for(size_t i=0;i<count;i++)if(!inputs[i]||!*inputs[i])return COMPILER_INVALID_INPUT;
- if(include_count&&!include_dirs)return COMPILER_INVALID_INPUT;
- for(size_t i=0;i<include_count;i++)if(!include_dirs[i]||!*include_dirs[i])return COMPILER_INVALID_INPUT;
- assembler_include_dirs=include_dirs;assembler_include_count=include_count;include_io_error=0;
- reset_assembly_state();nlines=0;nmacros=0;macro_unique=0;
- int result=assemble_files(inputs,count,output);
- reset_assembly_state();
- for(size_t i=0;i<nequs;i++){free(equs[i].name);free(equs[i].expr);}nequs=0;
- for(size_t i=0;i<nmacros;i++){
-   free(macros[i].name);
-   for(size_t j=0;j<macros[i].np;j++){free(macros[i].params[j]);free(macros[i].defaults[j]);}
-   for(size_t j=0;j<macros[i].nb;j++)free(macros[i].body[j].text);
-   free(macros[i].body);
- }
- nmacros=0;nlines=0;
- free(short_lines);short_lines=NULL;
- current_location=NULL;
- while(allocated_locations){SourceLocationNode *next=allocated_locations->allocated_next;free(allocated_locations);allocated_locations=next;}
- while(allocated_filenames){SourceFilename *next=allocated_filenames->next;free(allocated_filenames->name);free(allocated_filenames);allocated_filenames=next;}
- assembler_include_dirs=NULL;assembler_include_count=0;include_io_error=0;
- return result==2?COMPILER_IO_ERROR:result?COMPILER_CODEGEN_ERROR:COMPILER_OK;
+ return crunch_assemble_files_protecting_outputs(inputs,count,output,include_dirs,include_count,NULL,0);
 }
 
 /**
